@@ -33,10 +33,10 @@
 #define mpitype MPI_DOUBLE
 typedef double datatype;
 
-void sum(int n, datatype *const *c, datatype *const *partial_c_matrix);
+void sum(int rows, int cols, datatype *const *c, datatype *const *partial_c_matrix);
 void check_input_files(char *const *argv);
-datatype **init_partial_c_matrix(int n);
-datatype **init_local_c(int n, datatype **c, datatype *sc);
+datatype **init_partial_c_matrix(int rows, int cols);
+datatype **init_local_c(int rows, int cols, datatype **c, datatype *sc);
 int cfileexists(const char *filename);
 #define BLOCK_LOW(id, p, n)  ((id)*(n)/(p))
 
@@ -97,7 +97,8 @@ void read_checkerboard_matrix(
         MPI_Datatype dtype,   /* IN - Element type */
         int *rows,            /* OUT - Array rows */
         int *cols,            /* OUT - Array cols */
-        MPI_Comm grid_comm)   /* IN - Communicator */
+        MPI_Comm grid_comm,   /* IN - Communicator */
+        int max_dim           /* IN - Dimenson holding maximum (last) elements*/)
 {
     void *buffer;         /* File buffer */
     int coords[2];      /* Coords of proc receiving
@@ -113,6 +114,8 @@ void read_checkerboard_matrix(
     void *laddr;          /* Used when proc 0 gets row */
     int local_cols;     /* Matrix cols on this proc */
     int local_rows;     /* Matrix rows on this proc */
+    int max_rows;       /* Maximum matrix rows in this communicator */
+    int max_cols;       /* Maximum matrix cols in this communicator */
     void **lptr;           /* Pointer into 'subs' */
     int p;              /* Number of processes */
     void *raddr;          /* Address of first element
@@ -149,17 +152,36 @@ void read_checkerboard_matrix(
                  grid_coord);
     local_rows = BLOCK_SIZE(grid_coord[0], grid_size[0], *rows);
     local_cols = BLOCK_SIZE(grid_coord[1], grid_size[1], *cols);
+    max_rows = BLOCK_SIZE(grid_size[0] - 1, grid_size[0], *rows);
+    max_cols = BLOCK_SIZE(grid_size[1] - 1, grid_size[1], *cols);
+
 
     /* Dynamically allocate two-dimensional matrix 'subs' */
 
-    *storage = my_malloc(grid_id,
-                         local_rows * local_cols * datum_size);
-    *subs = (void **) my_malloc(grid_id, local_rows * sizeof(void *));
-    lptr = (void *) *subs;
-    rptr = (void *) *storage;
-    for (i = 0; i < local_rows; i++) {
-        *(lptr++) = (void *) rptr;
-        rptr += local_cols * datum_size;
+    if (max_dim == 0) { /* for B, holding maximum row */
+        *storage = my_malloc(grid_id,
+                             max_rows * local_cols * datum_size);
+        memset(*storage, 0, max_rows * local_cols * datum_size);
+        *subs = (void **) my_malloc(grid_id, max_rows * sizeof(void *));
+        lptr = (void *) *subs;
+        rptr = (void *) *storage;
+        for (i = 0; i < max_rows; i++) {
+            *(lptr++) = (void *) rptr;
+            rptr += local_cols * datum_size;
+        }
+
+    }
+    else {
+        *storage = my_malloc(grid_id,
+                             local_rows * max_cols * datum_size);
+        memset(*storage, 0, local_rows * max_cols * datum_size);
+        *subs = (void **) my_malloc(grid_id, local_rows * sizeof(void *));
+        lptr = (void *) *subs;
+        rptr = (void *) *storage;
+        for (i = 0; i < local_rows; i++) {
+            *(lptr++) = (void *) rptr;
+            rptr += max_cols * datum_size;
+        }
     }
 
     /* Grid process 0 reads in the matrix one row at a time
@@ -312,7 +334,6 @@ void my_matmul(int crow, int ccol, /* corner of C block */
                int arow, int acol, /* corner of A block */
                int brow, int bcol, /* corner of B block */
                int l, int m, int n, /* block A is l*m, block B is m*n, block C is l*n */
-               int N, /* matrices are N*N */
                datatype **a, datatype **b, datatype **c) { /* 2D matrices */
     int i, j, k;
     int lhalf[3], mhalf[3], nhalf[3]; /* quadrant sizes */
@@ -335,7 +356,7 @@ void my_matmul(int crow, int ccol, /* corner of C block */
                               arow + lhalf[i], acol + mhalf[k],
                               brow + mhalf[k], bcol + nhalf[j],
                               lhalf[i + 1], mhalf[k + 1], nhalf[j + 1],
-                              N, a, b, c);
+                              a, b, c);
     } else { /* block B fits in cache */
         for (i = 0; i < l; i++) {
             for (j = 0; j < n; j++) {
@@ -344,23 +365,20 @@ void my_matmul(int crow, int ccol, /* corner of C block */
                 bptr = &b[brow][bcol + j];
                 for (k = 0; k < m; k++) {
                     *cptr += *(aptr++) * (*bptr);
-                    bptr += N;
+                    bptr += n;
                 }
             }
         }
     }
 }
 
-void mat_mul(int n, datatype **a, datatype **b, datatype **c) {
-    my_matmul(0, 0, 0, 0, 0, 0, n, n, n, n, a, b, c);
-}
 
 int main(int argc, char *argv[]) {
     int p, p_sqrt;
     int id, coord[2];
     int dim[2], period[2];
     MPI_Comm comm;
-    int ma, na, mb, nb, n;
+    int ma, na, mb, nb, local_rows, local_cols, local_a_col_b_row, max_a_col_b_row;
     datatype **a, *sa;
     datatype **b, *sb;
     datatype **c, *sc;
@@ -396,78 +414,124 @@ int main(int argc, char *argv[]) {
     check_input_files(argv);
 
     /* read the submatrix of A managed by this process */
-    read_checkerboard_matrix(argv[1], (void ***) &a, (void **) &sa, mpitype, &ma, &na, comm);
-    printf("id=%d, coord[%d,%d]: read submatrix of A of dims %dx%d\n", id, coord[0], coord[1], ma, na);
-    /* YOUR CODE: sanity checks as necessary */
+    read_checkerboard_matrix(argv[1], (void ***) &a, (void **) &sa, mpitype, &ma, &na, comm, 1);
 
-    if (sqrt(ma * na) != ma || sqrt(ma * na) != na) {
-        my_abort("id = %d, matrix A is not squared", id);
-    }
+    /*if (id == 2) {*/
+        /*int local_rows = BLOCK_SIZE(coord[0], dim[0], ma);*/
+        /*int max_cols = BLOCK_SIZE(dim[1] - 1, dim[1], na);*/
+        /*for (int i = 0; i < local_rows; ++i) {*/
+            /*for (int j = 0; j < max_cols; ++j)*/
+                /*printf("%.2lf\t", a[i][j]);*/
+            /*printf("\n");*/
+        /*}*/
+    /*}*/
 
     /* read the submatrix of B managed by this process */
-    read_checkerboard_matrix(argv[2], (void ***) &b, (void **) &sb, mpitype, &mb, &nb, comm);
-    printf("id=%d, coord[%d,%d]: read submatrix of B of dims %dx%d\n", id, coord[0], coord[1], mb, nb);
+    read_checkerboard_matrix(argv[2], (void ***) &b, (void **) &sb, mpitype, &mb, &nb, comm, 0);
+    /*if (id == 3) {*/
+        /*int max_rows = BLOCK_SIZE(dim[0] - 1, dim[0], mb);*/
+        /*int local_cols = BLOCK_SIZE(coord[1], dim[1], nb);*/
+        /*for (int i = 0; i < max_rows; ++i) {*/
+            /*for (int j = 0; j < local_cols; ++j)*/
+                /*printf("%.2lf\t", b[i][j]);*/
+            /*printf("\n");*/
+        /*}*/
+    /*}*/
 
-    /* YOUR CODE: sanity checks as necessary (such as matrix compatibility) */
-
-    if (sqrt(mb * nb) != mb || sqrt(mb * nb) != nb) {
-        my_abort("id = %d, matrix B is not squared", id);
+    if (na != mb) {
+        my_abort("id = %d, colume of matrix A does not equal row of B", id);
     }
 
-    if (ma != mb || na != nb) {
-        my_abort("id = %d, matrix A and B have different dimensions", id);
-    }
-
-    if (ma % p_sqrt != 0) {
-        my_abort("id = %d, sqrt(%d) = %d cannot divide the number of rows %d", id, p, p_sqrt, ma);
-    }
-
-    if (na % p_sqrt != 0) {
-        my_abort("id = %d, sqrt(%d) = %d cannot divide the number of columns %d", id, p, p_sqrt, na);
-    }
-
-    /* YOUR CODE: THE CANNON ALGORITHM STARTS HERE */
-
-    n = ma / p_sqrt; /* IMPORTANT: we don't have the entire matrix; only the sub */
+    /* IMPORTANT: we don't have the entire matrix; only the sub */
+    local_rows = BLOCK_SIZE(coord[0], dim[0], ma);
+    local_cols = BLOCK_SIZE(coord[1], dim[1], nb);
+    local_a_col_b_row = BLOCK_SIZE(coord[1], dim[1], na);
+    max_a_col_b_row = BLOCK_SIZE(dim[1] - 1, dim[1], na);
 
     int source, dest;
 
-    datatype **partial_c_matrix = init_partial_c_matrix(n);
+    datatype **partial_c_matrix = init_partial_c_matrix(local_rows, local_cols);
 
-    MPI_Cart_shift(comm, 1, coord[0], &source, &dest);
-    MPI_Sendrecv_replace(sa, n * n, mpitype, dest, 0, source, 0, comm, MPI_STATUS_IGNORE);
+    MPI_Cart_shift(comm, 1, -coord[0], &source, &dest);
+    MPI_Sendrecv_replace(sa, local_rows * max_a_col_b_row, mpitype, dest, 0, source, 0, comm, MPI_STATUS_IGNORE);
 
-    MPI_Cart_shift(comm, 0, coord[1], &source, &dest);
-    MPI_Sendrecv_replace(sb, n * n, mpitype, dest, 0, source, 0, comm, MPI_STATUS_IGNORE);
+    MPI_Sendrecv_replace(&local_a_col_b_row, 1, MPI_INT, dest, 0, source, 0, comm, MPI_STATUS_IGNORE);
 
-    reconstruct_matrix(n, n, a, sa);
-    reconstruct_matrix(n, n, b, sb);
+    MPI_Cart_shift(comm, 0, -coord[1], &source, &dest);
+    MPI_Sendrecv_replace(sb, max_a_col_b_row * local_cols, mpitype, dest, 0, source, 0, comm, MPI_STATUS_IGNORE);
+
+    /*if (id == 3) {*/
+        /*printf("coord:[%d][%d] source: %d dest: %d\n", coord[0], coord[1], source, dest);*/
+        /*int local_rows = BLOCK_SIZE(coord[0], dim[0], ma);*/
+        /*int local_cols = BLOCK_SIZE(coord[1], dim[1], na);*/
+
+        /*printf("A[i][j]: \n");*/
+        /*for (int i = 0; i < local_rows; ++i) {*/
+            /*for (int j = 0; j < local_cols; ++j)*/
+                /*printf("%.2lf ", a[i][j]);*/
+            /*printf("\n");*/
+        /*}*/
+
+        /*printf("B[i][j]: \n");*/
+        /*for (int i = 0; i < local_rows; ++i) {*/
+            /*for (int j = 0; j < local_cols; ++j)*/
+                /*printf("%.2lf ", b[i][j]);*/
+            /*printf("\n");*/
+        /*}*/
+    /*}*/
 
     for (int i = 0; i < p_sqrt; ++i) {
-        c = init_local_c(n, c, sc);
+        c = init_local_c(local_rows, local_cols, c, sc);
 
-        mat_mul(n, a, b, c);
+        /*if (id == 0) {*/
 
-        sum(n, c, partial_c_matrix);
+            /*printf("A[%d][%d]: \n", coord[0], coord[1]);*/
+            /*for (int i = 0; i < local_rows; ++i) {*/
+                /*for (int j = 0; j < local_a_col_b_row; ++j)*/
+                    /*printf("%.2lf ", a[i][j]);*/
+                /*printf("\n");*/
+            /*}*/
+
+            /*printf("B[%d][%d]: \n", coord[0], coord[1]);*/
+            /*for (int i = 0; i < local_a_col_b_row; ++i) {*/
+                /*for (int j = 0; j < local_cols; ++j)*/
+                    /*printf("%.2lf ", b[i][j]);*/
+                /*printf("\n");*/
+            /*}*/
+        /*}*/
+
+        my_matmul(0, 0, 0, 0, 0, 0, local_rows, local_a_col_b_row, local_cols, a, b, c);
+
+        sum(local_rows, local_cols, c, partial_c_matrix);
 
         MPI_Cart_shift(comm, 1, 1, &source, &dest);
-        MPI_Sendrecv_replace(sa, n * n, mpitype, dest, 0, source, 0, comm, MPI_STATUS_IGNORE);
+        MPI_Sendrecv_replace(sa, local_rows * max_a_col_b_row, mpitype, dest, 0, source, 0, comm, MPI_STATUS_IGNORE);
+
+        MPI_Sendrecv_replace(&local_a_col_b_row, 1, MPI_INT, dest, 0, source, 0, comm, MPI_STATUS_IGNORE);
 
         MPI_Cart_shift(comm, 0, 1, &source, &dest);
-        MPI_Sendrecv_replace(sb, n * n, mpitype, dest, 0, source, 0, comm, MPI_STATUS_IGNORE);
+        MPI_Sendrecv_replace(sb, max_a_col_b_row * local_cols, mpitype, dest, 0, source, 0, comm, MPI_STATUS_IGNORE);
 
-        reconstruct_matrix(n, n, a, sa);
-        reconstruct_matrix(n, n, b, sb);
     }
 
+    /*if (id == 0) {*/
+
+        /*printf("C[%d][%d]: \n", coord[0], coord[1]);*/
+        /*for (int i = 0; i < local_rows; ++i) {*/
+            /*for (int j = 0; j < local_cols; ++j)*/
+                /*printf("%.2lf ", partial_c_matrix[i][j]);*/
+            /*printf("\n");*/
+        /*}*/
+    /*}*/
+
     /* write the submatrix of C managed by this process */
-    write_checkerboard_matrix(argv[3], (void **) partial_c_matrix, mpitype, ma, mb, comm);
+    write_checkerboard_matrix(argv[3], (void **) partial_c_matrix, mpitype, ma, nb, comm);
 
     /* final timing */
     elapsed_time += MPI_Wtime();
 
     if (!id) {
-        printf("elapsed time: %lf\n", elapsed_time);
+        printf("elapsed time: %lfs\n", elapsed_time);
     }
 
     MPI_Finalize();
@@ -495,34 +559,34 @@ int cfileexists(const char *filename) {
     return 0;
 }
 
-void sum(int n, datatype *const *c, datatype *const *partial_c_matrix) {
-    for (int ii = 0; ii < n; ++ii) {
-        for (int jj = 0; jj < n; ++jj) {
-            partial_c_matrix[ii][jj] += c[ii][jj];
+void sum(int rows, int cols, datatype *const *c, datatype *const *partial_c_matrix) {
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            partial_c_matrix[i][j] += c[i][j];
         }
     }
 }
 
-datatype **init_local_c(int n, datatype **c, datatype *sc) {
-    sc = (datatype *) malloc(n * n * sizeof(datatype));
-    memset(sc, 0, n * n * sizeof(datatype));
+datatype **init_local_c(int rows, int cols, datatype **c, datatype *sc) {
+    sc = (datatype *) malloc(rows * cols * sizeof(datatype));
+    memset(sc, 0, rows * cols * sizeof(datatype));
 
-    c = (datatype **) malloc(n * sizeof(datatype *));
+    c = (datatype **) malloc(rows * sizeof(datatype *));
 
-    for (int j = 0; j < n; j++) {
-        c[j] = &sc[j * n];
+    for (int j = 0; j < rows; j++) {
+        c[j] = &sc[j * cols];
     }
 
     return c;
 }
 
-datatype **init_partial_c_matrix(int n) {
-    datatype **partial_c_matrix = calloc((size_t) n, sizeof(datatype *));
+datatype **init_partial_c_matrix(int rows, int cols) {
+    datatype **partial_c_matrix = calloc((size_t) rows, sizeof(datatype *));
 
-    for (int i = 0; i < n; ++i) {
-        partial_c_matrix[i] = calloc((size_t) n, sizeof(datatype));
+    for (int i = 0; i < rows; ++i) {
+        partial_c_matrix[i] = calloc((size_t) cols, sizeof(datatype));
 
-        for (int j = 0; j < n; ++j) {
+        for (int j = 0; j < cols; ++j) {
             partial_c_matrix[i][j] = 0;
         }
     }
