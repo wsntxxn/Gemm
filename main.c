@@ -27,24 +27,27 @@
 
 /* set this parameter to reflect the cache line size of the particular
    machine you're running this program */
-#define CACHE_SIZE 1024
+#define CACHE_SIZE 32768
 
 /* in case later we decide to use another data type */
 #define mpitype MPI_DOUBLE
 typedef double datatype;
 
-void sum(int rows, int cols, datatype *const *c, datatype *const *partial_c_matrix);
-void check_input_files(char *const *argv);
-datatype **init_partial_c_matrix(int rows, int cols);
-datatype **init_local_c(int rows, int cols, datatype **c, datatype *sc);
-int cfileexists(const char *filename);
-#define BLOCK_LOW(id, p, n)  ((id)*(n)/(p))
-
 /* block decomposition macros */
-void reconstruct_matrix(int ma, int na, datatype *const *a, const datatype *sa);
+#define BLOCK_LOW(id, p, n)  ((id)*(n)/(p))
 #define BLOCK_HIGH(id, p, n) (BLOCK_LOW((id)+1,p,n)-1)
 #define BLOCK_SIZE(id, p, n) (BLOCK_HIGH(id,p,n)-BLOCK_LOW(id,p,n)+1)
 #define BLOCK_OWNER(j, p, n) (((p)*((j)+1)-1)/(n))
+
+int cfileexists(const char *filename) {
+    /* try to open file to read */
+    FILE *file;
+    if (file = fopen(filename, "r")) {
+        fclose(file);
+        return 1;
+    }
+    return 0;
+}
 
 /* print out error message and exit the program */
 void my_abort(const char *fmt, ...) {
@@ -62,6 +65,51 @@ void my_abort(const char *fmt, ...) {
     /* all MPI processes exit at this point */
     exit(1);
 }
+
+void sum(int rows, int cols, datatype *const *c, datatype *const *partial_c_matrix) {
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            partial_c_matrix[i][j] += c[i][j];
+        }
+    }
+}
+
+void check_input_files(char *const *argv) {
+    if (cfileexists(argv[1]) == 0) {
+        my_abort("Error: File %s is not accessible\n", argv[1]);
+    }
+
+    if (cfileexists(argv[2]) == 0) {
+        my_abort("Error: File %s is not accessible\n", argv[2]);
+    }
+}
+
+datatype **init_partial_c_matrix(int rows, int cols) {
+    datatype **partial_c_matrix = calloc((size_t) rows, sizeof(datatype *));
+
+    for (int i = 0; i < rows; ++i) {
+        partial_c_matrix[i] = calloc((size_t) cols, sizeof(datatype));
+
+        for (int j = 0; j < cols; ++j) {
+            partial_c_matrix[i][j] = 0;
+        }
+    }
+    return partial_c_matrix;
+}
+
+datatype **init_local_c(int rows, int cols, datatype **c, datatype *sc) {
+    sc = (datatype *) malloc(rows * cols * sizeof(datatype));
+    memset(sc, 0, rows * cols * sizeof(datatype));
+
+    c = (datatype **) malloc(rows * sizeof(datatype *));
+
+    for (int j = 0; j < rows; j++) {
+        c[j] = &sc[j * cols];
+    }
+
+    return c;
+}
+
 
 /* return the data size in bytes */
 int get_size(MPI_Datatype t) {
@@ -539,66 +587,8 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-void check_input_files(char *const *argv) {
-    if (cfileexists(argv[1]) == 0) {
-        my_abort("Error: File %s is not accessible\n", argv[1]);
-    }
 
-    if (cfileexists(argv[2]) == 0) {
-        my_abort("Error: File %s is not accessible\n", argv[2]);
-    }
-}
 
-int cfileexists(const char *filename) {
-    /* try to open file to read */
-    FILE *file;
-    if (file = fopen(filename, "r")) {
-        fclose(file);
-        return 1;
-    }
-    return 0;
-}
 
-void sum(int rows, int cols, datatype *const *c, datatype *const *partial_c_matrix) {
-    for (int i = 0; i < rows; ++i) {
-        for (int j = 0; j < cols; ++j) {
-            partial_c_matrix[i][j] += c[i][j];
-        }
-    }
-}
 
-datatype **init_local_c(int rows, int cols, datatype **c, datatype *sc) {
-    sc = (datatype *) malloc(rows * cols * sizeof(datatype));
-    memset(sc, 0, rows * cols * sizeof(datatype));
 
-    c = (datatype **) malloc(rows * sizeof(datatype *));
-
-    for (int j = 0; j < rows; j++) {
-        c[j] = &sc[j * cols];
-    }
-
-    return c;
-}
-
-datatype **init_partial_c_matrix(int rows, int cols) {
-    datatype **partial_c_matrix = calloc((size_t) rows, sizeof(datatype *));
-
-    for (int i = 0; i < rows; ++i) {
-        partial_c_matrix[i] = calloc((size_t) cols, sizeof(datatype));
-
-        for (int j = 0; j < cols; ++j) {
-            partial_c_matrix[i][j] = 0;
-        }
-    }
-    return partial_c_matrix;
-}
-
-void reconstruct_matrix(int ma, int na, datatype *const *a, const datatype *sa) {
-    int k = 0;
-
-    for (int i = 0; i < ma; ++i) {
-        for (int j = 0; j < na; ++j) {
-            a[i][j] = sa[k++];
-        }
-    }
-}

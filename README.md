@@ -6,4 +6,4 @@ For general matrix (not necessarily square)
 
 Cannon's Algorithm is very scalable. 
 
-![Iso-efficiency Analisys Cannon Algorithm](./cannpn.png)
+![Iso-efficiency Analisys Cannon Algorithm](./cannon.png)
