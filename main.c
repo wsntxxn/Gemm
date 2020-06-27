@@ -1,13 +1,11 @@
 /*
- * Code template for implementing ...
- *   matrix multiplication using Cannon's Algorithm in MPI
+ * Matrix multiplication using Cannon's Algorithm in MPI
  *
  * The program takes three command-line arguments: fileA, fileB, and
  * fileC. The first two files contain matrix A and B as the input. The
  * third file is used to store the result matrix C as the output. The
- * program compute: C = A x B. The program assumes the matrices A, B,
- * and C are n x n matrices, the number of processors p is square, and
- * n is evenly divisible by sqrt(p).
+ * program compute: C = A x B. The program assumes the number of 
+ * processors p is square, and n is evenly divisible by sqrt(p).
  *
  * The files containing the matrices are all binary files and have the
  * following format. The matrix is stored in row-wise order and
@@ -377,47 +375,16 @@ void write_checkerboard_matrix(
     }
 }
 
-/* recursive, block-oriented, sequential matrix multiplication */
-void my_matmul(int crow, int ccol, /* corner of C block */
-               int arow, int acol, /* corner of A block */
-               int brow, int bcol, /* corner of B block */
-               int l, int m, int n, /* block A is l*m, block B is m*n, block C is l*n */
-               datatype **a, datatype **b, datatype **c) { /* 2D matrices */
-    int i, j, k;
-    int lhalf[3], mhalf[3], nhalf[3]; /* quadrant sizes */
-    datatype *aptr, *bptr, *cptr;
-
-    if (m * n * sizeof(datatype) > CACHE_SIZE) { /* block B doesn't fit in cache */
-        lhalf[0] = 0;
-        lhalf[1] = l / 2;
-        lhalf[2] = l - l / 2;
-        mhalf[0] = 0;
-        mhalf[1] = m / 2;
-        mhalf[2] = m - m / 2;
-        nhalf[0] = 0;
-        nhalf[1] = n / 2;
-        nhalf[2] = n - n / 2;
-        for (i = 0; i < 2; i++)
-            for (j = 0; j < 2; j++)
-                for (k = 0; k < 2; k++)
-                    my_matmul(crow + lhalf[i], ccol + nhalf[j],
-                              arow + lhalf[i], acol + mhalf[k],
-                              brow + mhalf[k], bcol + nhalf[j],
-                              lhalf[i + 1], mhalf[k + 1], nhalf[j + 1],
-                              a, b, c);
-    } else { /* block B fits in cache */
-        for (i = 0; i < l; i++) {
-            for (j = 0; j < n; j++) {
-                cptr = &c[crow + i][ccol + j];
-                aptr = &a[arow + i][acol];
-                bptr = &b[brow][bcol + j];
-                for (k = 0; k < m; k++) {
-                    *cptr += *(aptr++) * (*bptr);
-                    bptr += n;
-                }
+void matmul(datatype **a, datatype **b, datatype **c, int m, int n, int k) {
+    for (int i = 0; i < m; ++i) {
+        for (int j = 0; j < k; ++j) {
+            c[i][j] = 0;
+            for (int l = 0; l < n; ++l) {
+                c[i][j] += a[i][l] * b[l][j];
             }
         }
     }
+    
 }
 
 
@@ -464,11 +431,12 @@ int main(int argc, char *argv[]) {
     /* read the submatrix of A managed by this process */
     read_checkerboard_matrix(argv[1], (void ***) &a, (void **) &sa, mpitype, &ma, &na, comm, 1);
 
-    /*if (id == 2) {*/
-        /*int local_rows = BLOCK_SIZE(coord[0], dim[0], ma);*/
+    /*if (id == 0) {*/
+        /*local_rows = BLOCK_SIZE(coord[0], dim[0], ma);*/
         /*int max_cols = BLOCK_SIZE(dim[1] - 1, dim[1], na);*/
-        /*for (int i = 0; i < local_rows; ++i) {*/
-            /*for (int j = 0; j < max_cols; ++j)*/
+        /*printf("local rows: %d max cols: %d\n", local_rows, max_cols);*/
+        /*for (int i = 0; i < local_rows && i < 10; ++i) {*/
+            /*for (int j = 0; j < max_cols && j < 10; ++j)*/
                 /*printf("%.2lf\t", a[i][j]);*/
             /*printf("\n");*/
         /*}*/
@@ -548,7 +516,8 @@ int main(int argc, char *argv[]) {
             /*}*/
         /*}*/
 
-        my_matmul(0, 0, 0, 0, 0, 0, local_rows, local_a_col_b_row, local_cols, a, b, c);
+        /*my_matmul(0, 0, 0, 0, 0, 0, local_rows, local_a_col_b_row, local_cols, a, b, c);*/
+        matmul(a, b, c, local_rows, local_a_col_b_row, local_cols);
 
         sum(local_rows, local_cols, c, partial_c_matrix);
 

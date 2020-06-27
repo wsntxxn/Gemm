@@ -84,10 +84,13 @@ void write_matrix(char* fname, datatype* sa, int m, int n)
 /* dumb matrix multiplication; used for debugging purposes */
 void dumb_matmul(datatype** a, datatype** b, datatype** c, int m, int n, int k) {
   int i, j, p;
-  for(i = 0; i < m; i++)
-    for(j = 0; j < n; j++)
-      for(p = 0; p < k; k++)
-        c[i][j] += a[i][k] * b[k][j];
+  for(i = 0; i < m; i++) {
+      for(j = 0; j < k; j++) {
+          c[i][j] = 0;
+          for(p = 0; p < n; p++)
+              c[i][j] += a[i][p] * b[p][j];
+      }
+  }
 }
 
 /* matrix multiplication using recursive block decomposition (from Quinn's book) */
